@@ -1,4 +1,4 @@
-name: Build APK v2
+name: Build APK v3
 
 on:
   pull_request:
@@ -45,54 +45,51 @@ jobs:
           path: app_pojavlauncher/libs
           allow_forks: false
 
-      - name: Get Java 8 from Amethyst prebuilt APK
+      - name: Get Java runtimes from the official PojavLauncher "gladiolus" release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p /tmp/rel && cd /tmp/rel
+          echo "Release assets:"
+          gh release view gladiolus -R PojavLauncherTeam/PojavLauncher --json assets --jq '.assets[] | "\(.name)  \(.size)"' || true
+          gh release download gladiolus -R PojavLauncherTeam/PojavLauncher -p '*.apk' || true
+          ls -la
+          ASSETS="$GITHUB_WORKSPACE/app_pojavlauncher/src/main/assets/components"
+          mkdir -p "$ASSETS"
+          for apk in *.apk; do
+            [ -f "$apk" ] || continue
+            echo "== $apk"
+            unzip -l "$apk" | grep 'assets/components/jre' | head -30 || true
+            rm -rf x && mkdir x
+            unzip -q "$apk" 'assets/components/jre*' -d x || true
+            for d in x/assets/components/jre*; do
+              [ -d "$d" ] || continue
+              name=$(basename "$d")
+              mkdir -p "$ASSETS/$name"
+              cp -r "$d"/. "$ASSETS/$name/"
+            done
+          done
+
+      - name: Fallback for Java 8 (Amethyst prebuilt APK)
+        run: |
+          ASSETS="$GITHUB_WORKSPACE/app_pojavlauncher/src/main/assets/components"
+          if [ -f "$ASSETS/jre/version" ]; then echo "Java 8 already present, skipping"; exit 0; fi
           mkdir -p /tmp/amethyst && cd /tmp/amethyst
           curl -fL --retry 3 -o amethyst.zip "https://nightly.link/AngelAuraMC/Amethyst-Android/workflows/android/v3_openjdk/app-debug%20%28recommended%29.zip"
           unzip -q amethyst.zip
           APK=$(find . -name '*.apk' | head -n1)
-          echo "Using APK: $APK"
-          unzip -l "$APK" | grep 'assets/components/' | grep -v 'lwjgl' | head -40 || true
-          unzip -q "$APK" 'assets/components/jre*' -d apk || true
-          ASSETS="$GITHUB_WORKSPACE/app_pojavlauncher/src/main/assets/components"
-          for d in apk/assets/components/jre*; do
-            [ -d "$d" ] || continue
-            name=$(basename "$d")
-            mkdir -p "$ASSETS/$name"
-            cp -r "$d"/. "$ASSETS/$name/"
-          done
-          echo "Installed runtimes:"
-          ls -la "$ASSETS"
-          test -f "$ASSETS/jre/version" || { echo "ERROR: Java 8 runtime was not found in the Amethyst APK"; exit 1; }
+          unzip -q "$APK" 'assets/components/jre/*' -d apk
+          mkdir -p "$ASSETS/jre"
+          cp -r apk/assets/components/jre/. "$ASSETS/jre/"
 
-      - name: Try to get Java 17
-        continue-on-error: true
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: build.yml
-          path: app_pojavlauncher/src/main/assets/components/jre-new
-          workflow_conclusion: success
-          repo: AngelAuraMC/angelauramc-openjdk-build
-          branch: buildjre17-21
-          name: jre17-pojav
-
-      - name: Try to get Java 21
-        continue-on-error: true
-        uses: dawidd6/action-download-artifact@v6
-        with:
-          workflow: build.yml
-          path: app_pojavlauncher/src/main/assets/components/jre-21
-          workflow_conclusion: success
-          repo: AngelAuraMC/angelauramc-openjdk-build
-          branch: buildjre17-21
-          name: jre21-pojav
-
-      - name: Report which Java runtimes are included
+      - name: Check Java runtimes
         run: |
           A=app_pojavlauncher/src/main/assets/components
           for d in jre jre-new jre-21; do
             if [ -f "$A/$d/version" ]; then echo "OK      $d"; else echo "MISSING $d"; fi
           done
+          test -f "$A/jre/version" || { echo "ERROR: Java 8 is missing"; exit 1; }
+          test -f "$A/jre-new/version" || { echo "ERROR: Java 17 is missing (LabyMod needs it)"; exit 1; }
 
       - uses: gradle/actions/setup-gradle@v4
         with:
