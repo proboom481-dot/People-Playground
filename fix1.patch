@@ -1,0 +1,29 @@
+diff -ruN a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java	2026-10-19 20:02:34.895779093 +0000
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java	2026-10-19 20:02:34.940159993 +0000
+@@ -371,6 +371,13 @@
+             javaArgList.add("-Dlog4j.configurationFile=" + configFile);
+         }
+         javaArgList.addAll(Arrays.asList(getMinecraftJVMArgs(versionId, gamedir)));
++        if(versionId != null && versionId.startsWith("LabyMod-")) {
++            // LabyMod ships its own desktop LWJGL natives. Make LWJGL look for the Android ones first.
++            javaArgList.add("-Dorg.lwjgl.librarypath=" + NATIVE_LIB_DIR);
++            // Diagnostics for the log: shows where LWJGL searches for and loads libraries from
++            javaArgList.add("-Dorg.lwjgl.util.Debug=true");
++            javaArgList.add("-Dorg.lwjgl.util.DebugLoader=true");
++        }
+         javaArgList.add("-cp");
+         javaArgList.add(getLWJGL3ClassPath() + ":" + launchClassPath);
+ 
+diff -ruN a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModDownloadTask.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModDownloadTask.java
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModDownloadTask.java	2026-10-19 20:02:34.900544526 +0000
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModDownloadTask.java	2026-10-19 20:02:34.940347691 +0000
+@@ -84,7 +84,7 @@
+             String name = asset.getKey();
+             String hash = asset.getValue();
+             File assetFile = new File(assetsDir, name + ".jar");
+-            File hashFile = new File(assetsDir, name + ".hash");
++            File hashFile = new File(assetsDir, name + ".pojav-hash");
+             if(!isAssetUpToDate(assetFile, hashFile, hash)) {
+                 File tempFile = new File(assetsDir, name + ".jar.part");
+                 DownloadUtils.downloadFileMonitored(LabyModUtils.createAssetUrl(mManifest, name, hash),
