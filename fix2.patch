@@ -1,0 +1,166 @@
+diff -ruN a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java	2026-10-19 20:21:46.920717544 +0000
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java	2026-10-19 20:21:46.922506209 +0000
+@@ -63,6 +63,7 @@
+ import net.kdt.pojavlaunch.lifecycle.LifecycleAwareAlertDialog;
+ import net.kdt.pojavlaunch.memory.MemoryHoleFinder;
+ import net.kdt.pojavlaunch.memory.SelfMapsParser;
++import net.kdt.pojavlaunch.modloaders.LabyModUtils;
+ import net.kdt.pojavlaunch.multirt.MultiRTUtils;
+ import net.kdt.pojavlaunch.multirt.Runtime;
+ import net.kdt.pojavlaunch.plugins.FFmpegPlugin;
+@@ -373,7 +374,8 @@
+         javaArgList.addAll(Arrays.asList(getMinecraftJVMArgs(versionId, gamedir)));
+         if(versionId != null && versionId.startsWith("LabyMod-")) {
+             // LabyMod ships its own desktop LWJGL natives. Make LWJGL look for the Android ones first.
+-            javaArgList.add("-Dorg.lwjgl.librarypath=" + NATIVE_LIB_DIR);
++            String lwjglNativesDir = LabyModUtils.prepareLwjglNatives(activity, NATIVE_LIB_DIR);
++            if(lwjglNativesDir != null) javaArgList.add("-Dorg.lwjgl.librarypath=" + lwjglNativesDir);
+             // Diagnostics for the log: shows where LWJGL searches for and loads libraries from
+             javaArgList.add("-Dorg.lwjgl.util.Debug=true");
+             javaArgList.add("-Dorg.lwjgl.util.DebugLoader=true");
+diff -ruN a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModDownloadTask.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModDownloadTask.java
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModDownloadTask.java	2026-10-19 20:21:46.920636006 +0000
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModDownloadTask.java	2026-10-19 20:21:46.922418631 +0000
+@@ -77,6 +77,9 @@
+     private void downloadAssets() throws IOException {
+         File assetsDir = new File(Tools.DIR_GAME_NEW, LabyModUtils.ASSETS_DIR_NAME);
+         FileUtils.ensureDirectory(assetsDir);
++        // LabyMod treats unknown files inside its assets folder as corrupted, so our bookkeeping lives elsewhere
++        File metaDir = new File(assetsDir.getParentFile(), "pojav-meta");
++        FileUtils.ensureDirectory(metaDir);
+         int assetCount = mManifest.assets.size();
+         byte[] buffer = new byte[8192];
+         mAssetIndex = 0;
+@@ -84,7 +87,7 @@
+             String name = asset.getKey();
+             String hash = asset.getValue();
+             File assetFile = new File(assetsDir, name + ".jar");
+-            File hashFile = new File(assetsDir, name + ".pojav-hash");
++            File hashFile = new File(metaDir, name + ".txt");
+             if(!isAssetUpToDate(assetFile, hashFile, hash)) {
+                 File tempFile = new File(assetsDir, name + ".jar.part");
+                 DownloadUtils.downloadFileMonitored(LabyModUtils.createAssetUrl(mManifest, name, hash),
+diff -ruN a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModUtils.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModUtils.java
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModUtils.java	2026-10-19 20:21:46.920688625 +0000
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModUtils.java	2026-10-19 20:21:46.922443441 +0000
+@@ -1,5 +1,9 @@
+ package net.kdt.pojavlaunch.modloaders;
+ 
++import android.content.Context;
++import android.os.Build;
++import android.util.Log;
++
+ import androidx.annotation.NonNull;
+ 
+ import net.kdt.pojavlaunch.utils.DownloadUtils;
+@@ -8,13 +12,20 @@
+ import org.json.JSONException;
+ import org.json.JSONObject;
+ 
++import java.io.File;
++import java.io.FileOutputStream;
+ import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
+ import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.Comparator;
++import java.util.Enumeration;
+ import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.zip.ZipEntry;
++import java.util.zip.ZipFile;
+ 
+ /**
+  * Helper for installing LabyMod 4 using the same public endpoints that the official
+@@ -146,6 +157,88 @@
+                 + manifest.commitReference + "/" + name + "/" + hash + ".jar";
+     }
+ 
++    /**
++     * LabyMod brings its own desktop (glibc) LWJGL natives, and LWJGL prefers natives found on the classpath
++     * over the Android ones. LWJGL looks into "org.lwjgl.librarypath" before it looks at the classpath, so we copy
++     * the Android natives that ship with the launcher into a readable folder and point LWJGL there.
++     * (The launcher's own native library folder is not accessible for LWJGL's check.)
++     * @return the folder to be used as org.lwjgl.librarypath, or null if the natives could not be prepared
++     */
++    public static String prepareLwjglNatives(Context context, String nativeLibDir) {
++        File outDir = new File(context.getCacheDir(), "labymod_lwjgl_natives");
++        try {
++            if(!outDir.isDirectory() && !outDir.mkdirs()) throw new IOException("Can't create " + outDir);
++            int copied = 0;
++            File[] existing = new File(nativeLibDir).listFiles();
++            if(existing != null) {
++                for(File file : existing) {
++                    if(!isLwjglNative(file.getName())) continue;
++                    copyIfChanged(file, new File(outDir, file.getName()));
++                    copied++;
++                }
++            }
++            if(copied == 0) {
++                // The libraries are not unpacked on the disk, take them straight from the APK
++                String abiFolder = abiFolderFor(new File(nativeLibDir).getName());
++                try (ZipFile apk = new ZipFile(context.getApplicationInfo().sourceDir)) {
++                    Enumeration<? extends ZipEntry> entries = apk.entries();
++                    while(entries.hasMoreElements()) {
++                        ZipEntry entry = entries.nextElement();
++                        String entryName = entry.getName();
++                        if(entry.isDirectory() || !entryName.startsWith("lib/" + abiFolder + "/")) continue;
++                        String fileName = entryName.substring(entryName.lastIndexOf('/') + 1);
++                        if(!isLwjglNative(fileName)) continue;
++                        File target = new File(outDir, fileName);
++                        if(target.isFile() && target.length() == entry.getSize()) { copied++; continue; }
++                        try (InputStream in = apk.getInputStream(entry)) {
++                            writeStream(in, target);
++                        }
++                        copied++;
++                    }
++                }
++            }
++            Log.i("LabyModUtils", "Prepared " + copied + " LWJGL natives in " + outDir);
++            return copied > 0 ? outDir.getAbsolutePath() : null;
++        }catch (IOException e) {
++            Log.e("LabyModUtils", "Failed to prepare LWJGL natives", e);
++            return null;
++        }
++    }
++
++    static boolean isLwjglNative(String fileName) {
++        return fileName.startsWith("liblwjgl") || fileName.equals("libopenal.so")
++                || fileName.equals("libglfw.so") || fileName.equals("libfreetype.so");
++    }
++
++    /** nativeLibraryDir ends with the short ABI name ("arm64"), while the APK uses the long one ("arm64-v8a") */
++    static String abiFolderFor(String shortName) {
++        switch (shortName) {
++            case "arm64": return "arm64-v8a";
++            case "arm": return "armeabi-v7a";
++            case "x86": return "x86";
++            case "x86_64": return "x86_64";
++            default: return Build.SUPPORTED_ABIS[0];
++        }
++    }
++
++    private static void copyIfChanged(File source, File target) throws IOException {
++        if(target.isFile() && target.length() == source.length()) return;
++        try (InputStream in = new java.io.FileInputStream(source)) {
++            writeStream(in, target);
++        }
++    }
++
++    private static void writeStream(InputStream in, File target) throws IOException {
++        File temp = new File(target.getParentFile(), target.getName() + ".part");
++        try (OutputStream out = new FileOutputStream(temp)) {
++            byte[] buffer = new byte[16384];
++            int read;
++            while((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
++        }
++        if(target.exists() && !target.delete()) throw new IOException("Can't replace " + target);
++        if(!temp.renameTo(target)) throw new IOException("Can't move " + temp + " to " + target);
++    }
++
+     private static JSONObject createLibrary(String name, String path, String url, String sha1, long size) throws JSONException {
+         JSONObject artifact = new JSONObject();
+         artifact.put("path", path);
