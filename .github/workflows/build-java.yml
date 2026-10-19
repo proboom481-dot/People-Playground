@@ -1,4 +1,4 @@
-name: Build APK (with Java)
+name: Build APK v2
 
 on:
   pull_request:
@@ -45,7 +45,7 @@ jobs:
           path: app_pojavlauncher/libs
           allow_forks: false
 
-      - name: Get Java runtimes from Amethyst prebuilt APK
+      - name: Get Java 8 from Amethyst prebuilt APK
         run: |
           mkdir -p /tmp/amethyst && cd /tmp/amethyst
           curl -fL --retry 3 -o amethyst.zip "https://nightly.link/AngelAuraMC/Amethyst-Android/workflows/android/v3_openjdk/app-debug%20%28recommended%29.zip"
@@ -63,7 +63,36 @@ jobs:
           done
           echo "Installed runtimes:"
           ls -la "$ASSETS"
-          test -f "$ASSETS/jre-new/version" || { echo "ERROR: Java 17 runtime was not found in the Amethyst APK"; exit 1; }
+          test -f "$ASSETS/jre/version" || { echo "ERROR: Java 8 runtime was not found in the Amethyst APK"; exit 1; }
+
+      - name: Try to get Java 17
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: build.yml
+          path: app_pojavlauncher/src/main/assets/components/jre-new
+          workflow_conclusion: success
+          repo: AngelAuraMC/angelauramc-openjdk-build
+          branch: buildjre17-21
+          name: jre17-pojav
+
+      - name: Try to get Java 21
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: build.yml
+          path: app_pojavlauncher/src/main/assets/components/jre-21
+          workflow_conclusion: success
+          repo: AngelAuraMC/angelauramc-openjdk-build
+          branch: buildjre17-21
+          name: jre21-pojav
+
+      - name: Report which Java runtimes are included
+        run: |
+          A=app_pojavlauncher/src/main/assets/components
+          for d in jre jre-new jre-21; do
+            if [ -f "$A/$d/version" ]; then echo "OK      $d"; else echo "MISSING $d"; fi
+          done
 
       - uses: gradle/actions/setup-gradle@v4
         with:
