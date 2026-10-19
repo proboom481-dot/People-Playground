@@ -1,4 +1,4 @@
-name: Build APK v3
+name: Build APK v4
 
 on:
   pull_request:
@@ -26,6 +26,14 @@ jobs:
           unzip -q pojav.zip
           cp -r PojavLauncher-gladiolus/. .
           rm -rf PojavLauncher-gladiolus pojav.zip
+
+      - name: Apply patches
+        run: |
+          shopt -s nullglob
+          for p in fix*.patch; do
+            echo "Applying $p"
+            patch -p1 --no-backup-if-mismatch < "$p"
+          done
 
       - name: Set up JDK 8
         uses: actions/setup-java@v4
