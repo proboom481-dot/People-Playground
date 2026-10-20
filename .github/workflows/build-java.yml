@@ -35,6 +35,11 @@ jobs:
             patch -p1 --no-backup-if-mismatch < "$p"
           done
 
+      - name: Remove librarypath override for LabyMod
+        run: |
+          sed -i '/javaArgList.add("-Dorg.lwjgl.librarypath=/d' app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java
+          grep -n "org.lwjgl.librarypath" app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java || echo "librarypath removed"
+
       - name: Set up JDK 8
         uses: actions/setup-java@v4
         with:
