@@ -1,0 +1,190 @@
+diff -ruN a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java
+--- a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java	2026-10-20 04:15:53.466367739 +0000
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/Tools.java	2026-10-20 04:15:53.476447355 +0000
+@@ -378,8 +378,18 @@
+             javaArgList.add("-Dorg.lwjgl.util.Debug=true");
+             javaArgList.add("-Dorg.lwjgl.util.DebugLoader=true");
+         }
++        String labyModNativesJar = null;
++        if(versionId != null && versionId.startsWith("LabyMod-")) {
++            // Put the Android LWJGL natives in front of LabyMod's desktop ones (see LabyModNatives)
++            labyModNativesJar = net.kdt.pojavlaunch.modloaders.LabyModNatives.prepare(activity, NATIVE_LIB_DIR);
++            if(labyModNativesJar != null) {
++                javaArgList.add("-Dorg.lwjgl.librarypath=" + net.kdt.pojavlaunch.modloaders.LabyModNatives.getExtractDir(activity));
++            }
++            // LabyMod's jemalloc has no Android natives, use the system allocator like the stock launcher does
++            javaArgList.add("-Dorg.lwjgl.system.allocator=system");
++        }
+         javaArgList.add("-cp");
+-        javaArgList.add(getLWJGL3ClassPath() + ":" + launchClassPath);
++        javaArgList.add((labyModNativesJar != null ? labyModNativesJar + ":" : "") + getLWJGL3ClassPath() + ":" + launchClassPath);
+ 
+         javaArgList.add(versionInfo.mainClass);
+         javaArgList.addAll(Arrays.asList(launchArgs));
+diff -ruN a/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModNatives.java b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModNatives.java
+--- /dev/null
++++ b/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/modloaders/LabyModNatives.java	2026-10-20 04:15:51.934269603 +0000
+@@ -0,0 +1,163 @@
++package net.kdt.pojavlaunch.modloaders;
++
++import android.content.Context;
++import android.util.Log;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++import java.util.zip.ZipEntry;
++import java.util.zip.ZipFile;
++import java.util.zip.ZipOutputStream;
++
++/**
++ * LabyMod 4 puts its own LWJGL jars (with desktop Linux natives) on the classpath, and LWJGL prefers a native library
++ * found on the classpath over any other source. Those desktop libraries can't be loaded on Android.
++ *
++ * To fix that we build a small jar that has the Android natives of the launcher at the very same paths inside
++ * (linux/arm64/org/lwjgl/liblwjgl.so and so on) and put it FIRST on the classpath. LWJGL then finds and extracts
++ * the Android libraries before it ever sees LabyMod's ones. LabyMod's own files are not touched.
++ */
++public class LabyModNatives {
++    private static final String TAG = "LabyModNatives";
++
++    /** Android library file name -> folder of the LWJGL module that it belongs to, inside the natives jar */
++    private static final String[][] LIBRARIES = {
++            {"liblwjgl.so", ""},
++            {"liblwjgl_opengl.so", "opengl/"},
++            {"liblwjgl_stb.so", "stb/"},
++            {"liblwjgl_tinyfd.so", "tinyfd/"},
++            {"liblwjgl_nanovg.so", "nanovg/"},
++            {"libopenal.so", "openal/"},
++            {"libglfw.so", "glfw/"},
++    };
++
++    private LabyModNatives() {}
++
++    /**
++     * @return the path of the natives jar to be put first on the classpath, or null if it could not be built
++     */
++    public static String prepare(Context context, String nativeLibDir) {
++        File cacheDir = context.getCacheDir();
++        File extractDir = new File(cacheDir, "labymod_lwjgl_natives");
++        File jarFile = new File(cacheDir, "labymod_pojav_natives.jar");
++        try {
++            // Old extracted copies (possibly the desktop ones from earlier launches) must not be reused
++            File[] cached = cacheDir.listFiles();
++            if(cached != null) {
++                for(File file : cached) {
++                    if(file.getName().startsWith("lwjgl_")) deleteRecursively(file);
++                }
++            }
++            deleteRecursively(extractDir);
++            if(!extractDir.mkdirs()) throw new IOException("Can't create " + extractDir);
++
++            String archFolder = archFolderFor(new File(nativeLibDir).getName());
++            int added = 0;
++            File temp = new File(cacheDir, "labymod_pojav_natives.jar.part");
++            try (ZipOutputStream out = new ZipOutputStream(new FileOutputStream(temp))) {
++                for(String[] library : LIBRARIES) {
++                    String fileName = library[0];
++                    byte[] data = readLibrary(context, nativeLibDir, fileName);
++                    if(data == null) continue;
++                    String entryName = "linux/" + archFolder + "/org/lwjgl/" + library[1] + fileName;
++                    out.putNextEntry(new ZipEntry(entryName));
++                    out.write(data);
++                    out.closeEntry();
++                    // LWJGL compares this checksum with the already extracted file
++                    out.putNextEntry(new ZipEntry(entryName + ".sha1"));
++                    out.write(sha1Hex(data).getBytes("UTF-8"));
++                    out.closeEntry();
++                    added++;
++                }
++            }
++            if(added == 0) {
++                temp.delete();
++                Log.e(TAG, "No Android LWJGL natives were found");
++                return null;
++            }
++            if(jarFile.exists() && !jarFile.delete()) throw new IOException("Can't replace " + jarFile);
++            if(!temp.renameTo(jarFile)) throw new IOException("Can't move " + temp + " to " + jarFile);
++            Log.i(TAG, "Built " + jarFile + " with " + added + " natives");
++            return jarFile.getAbsolutePath();
++        }catch (IOException | NoSuchAlgorithmException e) {
++            Log.e(TAG, "Failed to build the natives jar", e);
++            return null;
++        }
++    }
++
++    /** The folder where LWJGL is told to extract libraries to (see Tools: org.lwjgl.librarypath) */
++    public static String getExtractDir(Context context) {
++        return new File(context.getCacheDir(), "labymod_lwjgl_natives").getAbsolutePath();
++    }
++
++    /** Reads the library from the launcher's native folder, or straight from the APK if it is not unpacked there. */
++    private static byte[] readLibrary(Context context, String nativeLibDir, String fileName) throws IOException {
++        File onDisk = new File(nativeLibDir, fileName);
++        if(onDisk.isFile() && onDisk.canRead()) {
++            try (InputStream in = new FileInputStream(onDisk)) {
++                return readAll(in);
++            }
++        }
++        String abiFolder = abiFolderFor(new File(nativeLibDir).getName());
++        try (ZipFile apk = new ZipFile(context.getApplicationInfo().sourceDir)) {
++            ZipEntry entry = apk.getEntry("lib/" + abiFolder + "/" + fileName);
++            if(entry == null) return null;
++            try (InputStream in = apk.getInputStream(entry)) {
++                return readAll(in);
++            }
++        }catch (IOException e) {
++            Log.w(TAG, "Can't read " + fileName + " from the APK", e);
++            return null;
++        }
++    }
++
++    /** nativeLibraryDir ends with the short ABI name, the folder in LWJGL's natives uses its own naming */
++    static String archFolderFor(String shortName) {
++        switch (shortName) {
++            case "arm": return "arm32";
++            case "x86": return "x86";
++            case "x86_64": return "x64";
++            case "arm64":
++            default: return "arm64";
++        }
++    }
++
++    /** ... and the APK uses the long ABI names */
++    static String abiFolderFor(String shortName) {
++        switch (shortName) {
++            case "arm": return "armeabi-v7a";
++            case "x86": return "x86";
++            case "x86_64": return "x86_64";
++            case "arm64":
++            default: return "arm64-v8a";
++        }
++    }
++
++    private static byte[] readAll(InputStream in) throws IOException {
++        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
++        byte[] buffer = new byte[16384];
++        int read;
++        while((read = in.read(buffer)) != -1) out.write(buffer, 0, read);
++        return out.toByteArray();
++    }
++
++    private static String sha1Hex(byte[] data) throws NoSuchAlgorithmException {
++        byte[] digest = MessageDigest.getInstance("SHA-1").digest(data);
++        StringBuilder builder = new StringBuilder();
++        for(byte b : digest) builder.append(String.format("%02x", b));
++        return builder.toString();
++    }
++
++    private static void deleteRecursively(File file) {
++        File[] children = file.listFiles();
++        if(children != null) {
++            for(File child : children) deleteRecursively(child);
++        }
++        file.delete();
++    }
++}
